@@ -33,6 +33,57 @@ def write_sha256(path: Path):
     return output
 
 
+def normalize_entry(entry: dict, root: Path):
+    normalized = dict(entry)
+    rel = normalized.get("url")
+    if not rel:
+        return normalized
+
+    file_path = root / rel
+    if not file_path.is_file():
+        return normalized
+
+    packed_size = file_path.stat().st_size
+    packed_hash = sha256_file(file_path)
+
+    normalized["packedsize"] = packed_size
+    normalized["packedhash"] = packed_hash
+
+    if not normalized.get("unpackedhash"):
+        normalized["unpackedhash"] = packed_hash
+    if not normalized.get("unpackedsize"):
+        normalized["unpackedsize"] = packed_size
+
+    return normalized
+
+
+def choose_executable(existing_package_files: list[dict], configured: str):
+    localfiles = {entry.get("localfile") for entry in existing_package_files}
+    if configured and configured in localfiles:
+        return configured
+
+    executable_marked = [
+        entry.get("localfile")
+        for entry in existing_package_files
+        if entry.get("executable") is True and entry.get("localfile") in localfiles
+    ]
+    if executable_marked:
+        return executable_marked[0]
+
+    if "bin/client.exe" in localfiles:
+        return "bin/client.exe"
+
+    exe_candidates = [
+        entry.get("localfile")
+        for entry in existing_package_files
+        if isinstance(entry.get("localfile"), str) and entry.get("localfile", "").endswith(".exe")
+    ]
+    if exe_candidates:
+        return exe_candidates[0]
+
+    return configured
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Generate Windows release manifests and checksum files for OTBaiak launcher/client."
@@ -74,22 +125,37 @@ def main() -> int:
         if not rel:
             continue
         if (root / rel).is_file():
-            existing_package_files.append(entry)
+            existing_package_files.append(normalize_entry(entry, root))
         else:
             missing_package_files.append(rel)
+
+    if not existing_package_files:
+        print("ERROR: no package entries found with files present on disk", file=sys.stderr)
+        return 1
+
+    configured_executable = package_payload.get("executable", "bin/client_launcher.exe")
+    executable = choose_executable(existing_package_files, configured_executable)
+    if not executable or executable not in {entry.get("localfile") for entry in existing_package_files}:
+        print(
+            f"ERROR: could not resolve executable. Configured '{configured_executable}' is not available.",
+            file=sys.stderr,
+        )
+        return 1
+
+    normalized_assets_files = [normalize_entry(entry, root) for entry in assets_payload["files"]]
 
     client_manifest = {
         "revision": args.revision,
         "version": args.version,
         "files": existing_package_files,
-        "executable": package_payload.get("executable", "bin/client_launcher.exe"),
+        "executable": executable,
         "generation": args.generation,
         "variant": args.variant,
     }
 
     assets_manifest = {
         "version": args.revision,
-        "files": assets_payload["files"],
+        "files": normalized_assets_files,
     }
 
     version_manifest = {
@@ -125,6 +191,7 @@ def main() -> int:
     print(f"- {client_windows_path.name}")
     print(f"- {assets_windows_path.name}")
     print(f"- {version_path.name}")
+    print(f"- executable: {executable}")
     print(f"- client.windows.json entries: {len(existing_package_files)}")
     if missing_package_files:
         print(f"- skipped missing package entries: {len(missing_package_files)}")

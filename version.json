@@ -1,6 +1,16 @@
 {
-  "revision": 3,
+  "revision": 5,
   "version": "15.11.x",
   "generation": "otbaiak-v1.2",
-  "variant": "otbaiak"
+  "variant": "otbaiak",
+  "assets_bundle_urls": [
+    "assets.bundle.part1.zip",
+    "assets.bundle.part2.zip"
+  ],
+  "assets_bundle_sha256_list": [
+    "12ce491dcd7bf8de5b36e87056f3f3e195b93cd3d36997c7c085cf093fb2f39b",
+    "268948630a2b45ba9fef068e4ebd1c38660633fef059e0535cd61084d73b3f0f"
+  ],
+  "assets_bundle_url": "assets.bundle.part1.zip",
+  "assets_bundle_sha256": "12ce491dcd7bf8de5b36e87056f3f3e195b93cd3d36997c7c085cf093fb2f39b"
 }

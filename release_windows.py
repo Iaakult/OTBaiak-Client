@@ -5,6 +5,9 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+import zipfile
+
+BUNDLE_PART_MAX_BYTES = 80 * 1024 * 1024
 
 
 def read_json(path: Path):
@@ -31,6 +34,44 @@ def write_sha256(path: Path):
     output = path.with_suffix(path.suffix + ".sha256")
     output.write_text(f"{digest}  {path.name}\n", encoding="utf-8")
     return output
+
+
+def build_assets_bundles(root: Path) -> list[Path]:
+    assets_dir = root / "assets"
+    if not assets_dir.is_dir():
+        raise FileNotFoundError(f"Missing assets directory: {assets_dir}")
+
+    files = [file_path for file_path in sorted(assets_dir.rglob("*")) if file_path.is_file()]
+    if not files:
+        raise RuntimeError("No files found to build assets bundle")
+
+    parts: list[list[Path]] = []
+    current_part: list[Path] = []
+    current_size = 0
+
+    for file_path in files:
+        file_size = file_path.stat().st_size
+        if current_part and current_size + file_size > BUNDLE_PART_MAX_BYTES:
+            parts.append(current_part)
+            current_part = []
+            current_size = 0
+
+        current_part.append(file_path)
+        current_size += file_size
+
+    if current_part:
+        parts.append(current_part)
+
+    bundle_paths: list[Path] = []
+    for index, part_files in enumerate(parts, start=1):
+        bundle_path = root / f"assets.bundle.part{index}.zip"
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+            for file_path in part_files:
+                arcname = file_path.relative_to(root).as_posix()
+                archive.write(file_path, arcname=arcname)
+        bundle_paths.append(bundle_path)
+
+    return bundle_paths
 
 
 def normalize_entry(entry: dict, root: Path):
@@ -158,11 +199,19 @@ def main() -> int:
         "files": normalized_assets_files,
     }
 
+    assets_bundle_paths = build_assets_bundles(root)
+    assets_bundle_urls = [path.name for path in assets_bundle_paths]
+    assets_bundle_shas = [sha256_file(path) for path in assets_bundle_paths]
+
     version_manifest = {
         "revision": args.revision,
         "version": args.version,
         "generation": args.generation,
         "variant": args.variant,
+        "assets_bundle_urls": assets_bundle_urls,
+        "assets_bundle_sha256_list": assets_bundle_shas,
+        "assets_bundle_url": assets_bundle_urls[0],
+        "assets_bundle_sha256": assets_bundle_shas[0],
     }
 
     client_windows_path = root / "client.windows.json"
@@ -183,6 +232,8 @@ def main() -> int:
         root / "version.json",
     ]
 
+    files_to_hash.extend(assets_bundle_paths)
+
     for candidate in files_to_hash:
         if candidate.exists() and candidate.is_file():
             generated_sha.append(write_sha256(candidate))
@@ -191,6 +242,9 @@ def main() -> int:
     print(f"- {client_windows_path.name}")
     print(f"- {assets_windows_path.name}")
     print(f"- {version_path.name}")
+    print("- assets bundles:")
+    for bundle_path in assets_bundle_paths:
+        print(f"  * {bundle_path.name}")
     print(f"- executable: {executable}")
     print(f"- client.windows.json entries: {len(existing_package_files)}")
     if missing_package_files:

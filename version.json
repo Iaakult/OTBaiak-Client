@@ -1,6 +1,6 @@
 {
-  "version": "15.11.c9d1cf",
-  "revision": 1,
-  "generation": "otbaiak-v1.0",
+  "revision": 2,
+  "version": "15.11.x",
+  "generation": "otbaiak-v1.2",
   "variant": "otbaiak"
 }

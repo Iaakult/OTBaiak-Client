@@ -1,131 +1,142 @@
 #!/usr/bin/env python3
+
 import argparse
 import hashlib
 import json
-import lzma
+import sys
 from pathlib import Path
 
 
-def sha256_and_size(path: Path):
-    h = hashlib.sha256()
-    size = 0
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            size += len(chunk)
-            h.update(chunk)
-    return h.hexdigest(), size
+def read_json(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def unpacked_sha256_and_size_from_lzma(path: Path):
-    h = hashlib.sha256()
-    size = 0
-    with lzma.open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            size += len(chunk)
-            h.update(chunk)
-    return h.hexdigest(), size
+def write_json(path: Path, payload):
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
 
 
-def ensure_lzma_from_local(root: Path, url_path: str, localfile: str):
-    url_file = root / url_path
-    if url_file.exists():
-        return
-    if not url_path.endswith(".lzma"):
-        raise FileNotFoundError(f"Missing payload file: {url_path}")
-
-    local = root / localfile
-    if not local.exists():
-        raise FileNotFoundError(f"Missing local file to build lzma: {localfile} -> {url_path}")
-
-    url_file.parent.mkdir(parents=True, exist_ok=True)
-    data = local.read_bytes()
-    compressed = lzma.compress(data, format=lzma.FORMAT_ALONE)
-    url_file.write_bytes(compressed)
+def sha256_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
 
 
-def update_manifest(root: Path, manifest_name: str):
-    manifest_path = root / manifest_name
-    data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    updated_fields = 0
-
-    for entry in data.get("files", []):
-        url_rel = entry["url"]
-        local_rel = entry["localfile"]
-
-        ensure_lzma_from_local(root, url_rel, local_rel)
-
-        url_file = root / url_rel
-        packed_hash, packed_size = sha256_and_size(url_file)
-
-        if entry.get("packedhash") != packed_hash:
-            entry["packedhash"] = packed_hash
-            updated_fields += 1
-        if entry.get("packedsize") != packed_size:
-            entry["packedsize"] = packed_size
-            updated_fields += 1
-
-        local_file = root / local_rel
-        if local_file.exists():
-            unpacked_hash, unpacked_size = sha256_and_size(local_file)
-        elif url_rel.endswith(".lzma"):
-            unpacked_hash, unpacked_size = unpacked_sha256_and_size_from_lzma(url_file)
-        else:
-            unpacked_hash, unpacked_size = packed_hash, packed_size
-
-        if entry.get("unpackedhash") != unpacked_hash:
-            entry["unpackedhash"] = unpacked_hash
-            updated_fields += 1
-        if entry.get("unpackedsize") != unpacked_size:
-            entry["unpackedsize"] = unpacked_size
-            updated_fields += 1
-
-    manifest_path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-    return data, updated_fields
+def write_sha256(path: Path):
+    digest = sha256_file(path)
+    output = path.with_suffix(path.suffix + ".sha256")
+    output.write_text(f"{digest}  {path.name}\n", encoding="utf-8")
+    return output
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Automate OTBaiak Windows release manifests")
-    parser.add_argument("--root", default=".", help="Client repo root (default: current dir)")
-    parser.add_argument("--generation", help="New generation value for version.json (e.g. otbaiak-v1.1)")
-    parser.add_argument("--version", help="New version value for version.json (e.g. 15.11.custom)")
-    parser.add_argument("--revision", type=int, help="New revision value for version.json")
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate Windows release manifests and checksum files for OTBaiak launcher/client."
+    )
+    parser.add_argument("--generation", required=True, help="Release generation identifier, e.g. otbaiak-v1.2")
+    parser.add_argument("--revision", required=True, type=int, help="Numeric revision used by launcher")
+    parser.add_argument("--version", required=True, help="Display version, e.g. 15.11.x")
+    parser.add_argument("--variant", default="otbaiak", help="Release variant (default: otbaiak)")
+    parser.add_argument("--root", default=".", help="Client package root folder (default: current directory)")
     args = parser.parse_args()
 
     root = Path(args.root).resolve()
+    package_path = root / "package.json"
+    assets_path = root / "assets.json"
 
-    client_data, client_updates = update_manifest(root, "client.windows.json")
-    _, assets_updates = update_manifest(root, "assets.windows.json")
+    if not package_path.exists():
+        print(f"ERROR: missing file {package_path}", file=sys.stderr)
+        return 1
+    if not assets_path.exists():
+        print(f"ERROR: missing file {assets_path}", file=sys.stderr)
+        return 1
 
+    package_payload = read_json(package_path)
+    assets_payload = read_json(assets_path)
+
+    if "files" not in package_payload or not isinstance(package_payload["files"], list):
+        print("ERROR: package.json is missing a valid 'files' array", file=sys.stderr)
+        return 1
+    if "files" not in assets_payload or not isinstance(assets_payload["files"], list):
+        print("ERROR: assets.json is missing a valid 'files' array", file=sys.stderr)
+        return 1
+
+    package_files = package_payload["files"]
+    existing_package_files = []
+    missing_package_files = []
+
+    for entry in package_files:
+        rel = entry.get("url")
+        if not rel:
+            continue
+        if (root / rel).is_file():
+            existing_package_files.append(entry)
+        else:
+            missing_package_files.append(rel)
+
+    client_manifest = {
+        "revision": args.revision,
+        "version": args.version,
+        "files": existing_package_files,
+        "executable": package_payload.get("executable", "bin/client_launcher.exe"),
+        "generation": args.generation,
+        "variant": args.variant,
+    }
+
+    assets_manifest = {
+        "version": args.revision,
+        "files": assets_payload["files"],
+    }
+
+    version_manifest = {
+        "revision": args.revision,
+        "version": args.version,
+        "generation": args.generation,
+        "variant": args.variant,
+    }
+
+    client_windows_path = root / "client.windows.json"
+    assets_windows_path = root / "assets.windows.json"
     version_path = root / "version.json"
-    if version_path.exists():
-        version_data = json.loads(version_path.read_text(encoding="utf-8"))
-    else:
-        version_data = {
-            "version": client_data.get("version", ""),
-            "revision": client_data.get("revision", 1),
-            "generation": client_data.get("generation", "otbaiak-v1.0"),
-            "variant": client_data.get("variant", "otbaiak"),
-        }
 
-    if args.generation:
-        version_data["generation"] = args.generation
-    if args.version:
-        version_data["version"] = args.version
-    if args.revision is not None:
-        version_data["revision"] = args.revision
+    write_json(client_windows_path, client_manifest)
+    write_json(assets_windows_path, assets_manifest)
+    write_json(version_path, version_manifest)
 
-    version_path.write_text(json.dumps(version_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    generated_sha = []
+    files_to_hash = [
+        root / "OTBaiak.exe",
+        root / "Slender.exe",
+        root / "assets.json",
+        root / "assets.windows.json",
+        root / "client.windows.json",
+        root / "version.json",
+    ]
 
-    exe = root / "OTBaiak.exe"
-    if exe.exists():
-        exe_hash, _ = sha256_and_size(exe)
-        (root / "OTBaiak.exe.sha256").write_text(f"{exe_hash}  OTBaiak.exe\n", encoding="utf-8")
+    for candidate in files_to_hash:
+        if candidate.exists() and candidate.is_file():
+            generated_sha.append(write_sha256(candidate))
 
-    print("Done")
-    print(f"client.windows.json fields updated: {client_updates}")
-    print(f"assets.windows.json fields updated: {assets_updates}")
-    print(f"version.json: {version_data}")
+    print("Release files generated:")
+    print(f"- {client_windows_path.name}")
+    print(f"- {assets_windows_path.name}")
+    print(f"- {version_path.name}")
+    print(f"- client.windows.json entries: {len(existing_package_files)}")
+    if missing_package_files:
+        print(f"- skipped missing package entries: {len(missing_package_files)}")
+        for rel in missing_package_files:
+            print(f"  * {rel}")
+    if generated_sha:
+        print("SHA256 files generated:")
+        for item in generated_sha:
+            print(f"- {item.name}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
